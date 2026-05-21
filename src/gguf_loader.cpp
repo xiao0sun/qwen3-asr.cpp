@@ -290,8 +290,10 @@ bool GGUFLoader::load_tensor_data(const std::string & path, gguf_context * ctx,
         }
     }
 
-    if (is_cuda) {
-        ggml_backend_t backend = ggml_backend_dev_init(gpu_dev, nullptr);
+    ggml_backend_t gpu_backend = gpu_dev ? ggml_backend_dev_init(gpu_dev, nullptr) : nullptr;
+
+    if (is_cuda && gpu_backend) {
+        ggml_backend_t backend = gpu_backend;
         model.buffer = ggml_backend_alloc_ctx_tensors(model.ctx, backend);
         if (model.buffer) {
             ggml_backend_buffer_set_usage(model.buffer, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
@@ -303,9 +305,8 @@ bool GGUFLoader::load_tensor_data(const std::string & path, gguf_context * ctx,
                 ggml_backend_tensor_set(it->second, data_base + offset, 0, ggml_nbytes(it->second));
             }
         }
-        ggml_backend_free(backend);
     } else {
-        if (gpu_dev) {
+        if (gpu_backend) {
             model.buffer = ggml_backend_dev_buffer_from_host_ptr(gpu_dev, data_base, total_size, max_tensor_size);
         }
         if (!model.buffer) {
@@ -332,6 +333,10 @@ bool GGUFLoader::load_tensor_data(const std::string & path, gguf_context * ctx,
         }
     }
 
+    if (gpu_backend) {
+        ggml_backend_free(gpu_backend);
+    }
+    
     return true;
 }
 
