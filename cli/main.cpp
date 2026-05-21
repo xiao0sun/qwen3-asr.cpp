@@ -10,6 +10,7 @@
 #include <cctype>
 #include <string>
 #include <fstream>
+#include <iostream>
 
 struct cli_params {
     std::string model_path = "models/qwen3-asr-0.6b-f16.gguf";
@@ -27,6 +28,7 @@ struct cli_params {
     bool transcribe_align_mode = false;
     bool profile = false;
     bool output_srt = false;
+    bool worker_mode = false;
 };
 
 static void print_usage(const char * prog) {
@@ -43,6 +45,7 @@ static void print_usage(const char * prog) {
     fprintf(stderr, "  --no-timing            Don't print timing information\n");
     fprintf(stderr, "  --tokens               Print token IDs\n");
     fprintf(stderr, "  --profile              Print detailed timing profile (requires QWEN3_ASR_TIMING build)\n");
+    fprintf(stderr, "  --worker               Keep model loaded and process JSONL requests from stdin\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Forced Alignment:\n");
     fprintf(stderr, "  --align                Enable forced alignment mode\n");
@@ -116,6 +119,8 @@ static bool parse_args(int argc, char ** argv, cli_params & params) {
             params.print_tokens = true;
         } else if (strcmp(arg, "--profile") == 0) {
             params.profile = true;
+        } else if (strcmp(arg, "--worker") == 0) {
+            params.worker_mode = true;
         } else if (strcmp(arg, "--align") == 0) {
             params.align_mode = true;
         } else if (strcmp(arg, "-osrt") == 0 || strcmp(arg, "--output-srt") == 0) {
@@ -143,7 +148,7 @@ static bool parse_args(int argc, char ** argv, cli_params & params) {
         }
     }
     
-    if (params.audio_path.empty()) {
+    if (!params.worker_mode && params.audio_path.empty()) {
         fprintf(stderr, "Error: Audio file path is required (-f/--audio)\n");
         return false;
     }
@@ -465,6 +470,127 @@ static int run_transcription(const cli_params & params) {
     return 0;
 }
 
+static bool json_bool_value(const std::string & line, const std::string & key) {
+    std::string pattern = "\"" + key + "\"";
+    size_t pos = line.find(pattern);
+    if (pos == std::string::npos) return false;
+    pos = line.find(':', pos + pattern.size());
+    if (pos == std::string::npos) return false;
+    size_t start = line.find_first_not_of(" \t\r\n", pos + 1);
+    return start != std::string::npos && line.compare(start, 4, "true") == 0;
+}
+
+static std::string json_string_value(const std::string & line, const std::string & key) {
+    std::string pattern = "\"" + key + "\"";
+    size_t pos = line.find(pattern);
+    if (pos == std::string::npos) return "";
+    pos = line.find(':', pos + pattern.size());
+    if (pos == std::string::npos) return "";
+    pos = line.find('"', pos + 1);
+    if (pos == std::string::npos) return "";
+    std::string value;
+    bool escape = false;
+    for (size_t i = pos + 1; i < line.size(); ++i) {
+        char c = line[i];
+        if (escape) {
+            switch (c) {
+                case '"': value.push_back('"'); break;
+                case '\\': value.push_back('\\'); break;
+                case 'n': value.push_back('\n'); break;
+                case 'r': value.push_back('\r'); break;
+                case 't': value.push_back('\t'); break;
+                default: value.push_back(c); break;
+            }
+            escape = false;
+        } else if (c == '\\') {
+            escape = true;
+        } else if (c == '"') {
+            return value;
+        } else {
+            value.push_back(c);
+        }
+    }
+    return "";
+}
+
+static int json_int_value(const std::string & line, const std::string & key, int default_value) {
+    std::string pattern = "\"" + key + "\"";
+    size_t pos = line.find(pattern);
+    if (pos == std::string::npos) return default_value;
+    pos = line.find(':', pos + pattern.size());
+    if (pos == std::string::npos) return default_value;
+    size_t start = line.find_first_of("-0123456789", pos + 1);
+    if (start == std::string::npos) return default_value;
+    return std::atoi(line.c_str() + start);
+}
+
+static int run_worker(const cli_params & params) {
+    fprintf(stderr, "qwen3-asr-cli (Worker Mode)\n");
+    fprintf(stderr, "  Model: %s\n", params.model_path.c_str());
+    fprintf(stderr, "  Threads: %d\n", params.n_threads);
+    fprintf(stderr, "\n");
+
+    qwen3_asr::Qwen3ASR asr;
+    if (!asr.load_model(params.model_path)) {
+        fprintf(stderr, "Error: %s\n", asr.get_error().c_str());
+        printf("{\"type\":\"ready\",\"ok\":false,\"error\":\"%s\"}\n",
+               escape_json_string(asr.get_error()).c_str());
+        fflush(stdout);
+        return 1;
+    }
+
+    printf("{\"type\":\"ready\",\"ok\":true}\n");
+    fflush(stdout);
+
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        if (line.empty()) continue;
+
+        std::string id = json_string_value(line, "id");
+        if (id.empty()) id = "0";
+
+        if (json_bool_value(line, "shutdown")) {
+            printf("{\"id\":\"%s\",\"ok\":true,\"shutdown\":true}\n",
+                   escape_json_string(id).c_str());
+            fflush(stdout);
+            break;
+        }
+
+        std::string audio_path = json_string_value(line, "audio");
+        if (audio_path.empty()) {
+            printf("{\"id\":\"%s\",\"ok\":false,\"error\":\"missing audio\"}\n",
+                   escape_json_string(id).c_str());
+            fflush(stdout);
+            continue;
+        }
+
+        qwen3_asr::transcribe_params tp;
+        tp.max_tokens = json_int_value(line, "max_tokens", params.max_tokens);
+        tp.language = json_string_value(line, "language");
+        if (tp.language.empty()) tp.language = params.language;
+        tp.n_threads = json_int_value(line, "threads", params.n_threads);
+        tp.print_progress = false;
+        tp.print_timing = false;
+
+        auto result = asr.transcribe(audio_path, tp);
+        if (!result.success) {
+            printf("{\"id\":\"%s\",\"ok\":false,\"error\":\"%s\"}\n",
+                   escape_json_string(id).c_str(),
+                   escape_json_string(result.error_msg).c_str());
+            fflush(stdout);
+            continue;
+        }
+
+        printf("{\"id\":\"%s\",\"ok\":true,\"text\":\"%s\",\"language\":\"%s\"}\n",
+               escape_json_string(id).c_str(),
+               escape_json_string(result.text).c_str(),
+               escape_json_string(result.language).c_str());
+        fflush(stdout);
+    }
+
+    return 0;
+}
+
 static int run_transcribe_and_align(const cli_params & params) {
     fprintf(stderr, "qwen3-asr-cli (Transcribe + Align Mode)\n");
     fprintf(stderr, "  ASR Model: %s\n", params.model_path.c_str());
@@ -624,6 +750,10 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "\n");
         print_usage(argv[0]);
         return 1;
+    }
+
+    if (params.worker_mode) {
+        return run_worker(params);
     }
     
     if (params.transcribe_align_mode) {
