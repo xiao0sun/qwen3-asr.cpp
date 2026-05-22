@@ -23,6 +23,8 @@ A high-performance C++ implementation of Qwen3-ASR and Qwen3-ForcedAligner using
 |-------|------|-------------|
 | `qwen3-asr-0.6b-f16.gguf` | ~1.8 GB | ASR model, F16 precision |
 | `qwen3-asr-0.6b-q8_0.gguf` | ~1.3 GB | ASR model, Q8_0 quantized |
+| `qwen3-asr-1.7b-f16.gguf` | ~3.4 GB | Larger ASR model, F16 precision |
+| `qwen3-asr-1.7b-q4_1.gguf` | ~2.3 GB | Larger ASR model, Q4_1 quantized |
 | `qwen3-forced-aligner-0.6b-f16.gguf` | ~1.8 GB | Forced alignment model |
 
 ## Requirements
@@ -56,6 +58,9 @@ Transcribe audio files to text:
 ```bash
 # Basic transcription
 ./build/qwen3-asr-cli -m models/qwen3-asr-0.6b-f16.gguf -f audio.wav
+
+# Larger 1.7B ASR model (recommended when you can afford the memory)
+./build/qwen3-asr-cli -m models/qwen3-asr-1.7b-q4_1.gguf -f audio.wav
 
 # With quantized model (faster, less memory)
 ./build/qwen3-asr-cli -m models/qwen3-asr-0.6b-q8_0.gguf -f audio.wav
@@ -103,7 +108,7 @@ Automatically transcribe and then align the result (recommended):
 
 ```bash
 ./build/qwen3-asr-cli \
-  -m models/qwen3-asr-0.6b-f16.gguf \
+  -m models/qwen3-asr-1.7b-q4_1.gguf \
   --aligner-model models/qwen3-forced-aligner-0.6b-f16.gguf \
   -f audio.wav \
   --transcribe-align
@@ -121,7 +126,7 @@ Worker mode keeps the ASR model loaded and processes one JSON request per line f
 
 ```bash
 ./build/qwen3-asr-cli \
-  -m models/qwen3-asr-0.6b-f16.gguf \
+  -m models/qwen3-asr-1.7b-q4_1.gguf \
   --worker \
   --lang japanese
 ```
@@ -220,6 +225,12 @@ python scripts/convert_hf_to_gguf.py \
     --input /path/to/Qwen3-ASR-0.6B \
     --output models/qwen3-asr-0.6b-q8_0.gguf \
     --type q8_0
+
+# Convert 1.7B ASR model (Q4_1 quantized)
+python scripts/convert_hf_to_gguf.py \
+    --input /path/to/Qwen3-ASR-1.7B \
+    --output models/qwen3-asr-1.7b-q4_1.gguf \
+    --type q4_1
 
 # Convert ForcedAligner model
 python scripts/convert_hf_to_gguf.py \
@@ -323,7 +334,7 @@ This project is licensed under the MIT License. See LICENSE for details.
 ## Acknowledgments
 
 - [GGML](https://github.com/ggerganov/ggml) - Tensor library for machine learning
-- [Qwen3-ASR](https://huggingface.co/Qwen/Qwen3-ASR-0.6B) - Original model by Alibaba
+- [Qwen3-ASR 0.6B](https://huggingface.co/Qwen/Qwen3-ASR-0.6B) and [Qwen3-ASR 1.7B](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) - Original ASR models by Alibaba
 - [Qwen3-ForcedAligner](https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B) - Original aligner model by Alibaba
 
 ---
