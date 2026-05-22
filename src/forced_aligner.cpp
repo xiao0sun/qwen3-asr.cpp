@@ -1608,7 +1608,8 @@ std::vector<int32_t> ForcedAligner::tokenize_with_timestamps(
 
     if (language == "korean" && !model_.ko_dict.empty()) {
         raw_words = tokenize_korean(text, model_.ko_dict);
-    } else if (language == "chinese" || language == "zh") {
+    } else if (language == "chinese" || language == "zh" ||
+               language == "japanese" || language == "ja" || language == "jp") {
         raw_words = split_utf8_chars(text);
     } else {
         size_t i = 0;
