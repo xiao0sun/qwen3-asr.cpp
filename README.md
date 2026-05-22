@@ -12,9 +12,10 @@ A high-performance C++ implementation of Qwen3-ASR and Qwen3-ForcedAligner using
 - **Accelerate/vDSP**: Highly optimized mel spectrogram computation (45x speedup)
 - **mmap Weight Loading**: Zero-copy GPU transfer for fast model initialization
 - **F16 KV Cache**: Reduced memory bandwidth with half-precision key-value cache
-- **Korean Word Splitting**: Soynlp LTokenizer algorithm with 18K-word dictionary
+- **Language-Aware Alignment Units**: Korean dictionary splitting, Chinese/Japanese UTF-8 character splitting, whitespace splitting for other languages
 - **Quantization Support**: Q8_0 quantization for reduced memory usage (~40% smaller)
-- **Pure C++17**: No Python runtime required for inference
+- **Persistent Worker Mode**: Keep the ASR model loaded and serve JSONL transcription requests over stdin/stdout
+- **Pure C++20**: No Python runtime required for inference
 
 ## Supported Models
 
@@ -27,7 +28,7 @@ A high-performance C++ implementation of Qwen3-ASR and Qwen3-ForcedAligner using
 ## Requirements
 
 - CMake 3.14+
-- C++17 compatible compiler (Clang 7+, GCC 8+, MSVC 2019+)
+- C++20 compatible compiler
 - Apple Silicon recommended (Metal GPU support)
 - GGML library (included as submodule)
 
@@ -35,7 +36,7 @@ A high-performance C++ implementation of Qwen3-ASR and Qwen3-ForcedAligner using
 
 ```bash
 # Clone the repository with submodules
-git clone --recursive https://github.com/predict-woo/qwen3-asr.cpp.git
+git clone --recursive https://github.com/xiao0sun/qwen3-asr.cpp.git
 cd qwen3-asr.cpp
 
 # Build
@@ -79,6 +80,14 @@ Align reference text to audio with word-level timestamps:
   --text "transcript text" \
   --lang korean
 
+# Japanese and Chinese are split into UTF-8 characters for stable timestamps
+./build/qwen3-asr-cli \
+  -m models/qwen3-forced-aligner-0.6b-f16.gguf \
+  -f ja.wav \
+  --align \
+  --text "うちの中学は弁当制で持っていけない場合は50円の学校販売のパンを買う。" \
+  --lang japanese
+
 # Save alignment to JSON file
 ./build/qwen3-asr-cli \
   -m models/qwen3-forced-aligner-0.6b-f16.gguf \
@@ -106,11 +115,41 @@ This mode automatically:
 - Runs forced alignment with the detected language
 - Outputs word-level timestamps as JSON
 
+### 4. Persistent Worker Mode
+
+Worker mode keeps the ASR model loaded and processes one JSON request per line from stdin:
+
+```bash
+./build/qwen3-asr-cli \
+  -m models/qwen3-asr-0.6b-f16.gguf \
+  --worker \
+  --lang japanese
+```
+
+The worker first prints a ready message:
+
+```json
+{"type":"ready","ok":true}
+```
+
+Then send JSONL requests:
+
+```json
+{"id":"1","audio":"sample.wav","language":"japanese","threads":4,"max_tokens":512}
+{"id":"2","shutdown":true}
+```
+
+Successful transcription responses look like:
+
+```json
+{"id":"1","ok":true,"text":"transcript text","language":"japanese"}
+```
+
 ### Output Formats
 
 **Transcription** outputs plain text:
 ```
-language Korean 안녕하세요 여러분 오늘은...
+안녕하세요 여러분 오늘은...
 ```
 
 **Forced Alignment** outputs JSON with word-level timestamps:
@@ -122,6 +161,18 @@ language Korean 안녕하세요 여러분 오늘은...
     {"word": "오늘은", "start": 0.880, "end": 1.200}
   ]
 }
+```
+
+Use `-osrt` or `--output-srt` with forced alignment or transcribe+align mode to emit SRT:
+
+```bash
+./build/qwen3-asr-cli \
+  -m models/qwen3-forced-aligner-0.6b-f16.gguf \
+  -f audio.wav \
+  --align \
+  --text "Hello world" \
+  --output-srt \
+  -o subtitles.srt
 ```
 
 ## Performance
@@ -148,7 +199,7 @@ Benchmark on 92-second Korean audio, Apple M2 Pro (10-core CPU, 16-core GPU):
 - **Selective Logits**: Only compute last token logits for lm_head (saves computation)
 - **Weight Tying**: token_embd = output weight (saves memory)
 - **vDSP/Accelerate Mel**: 45x speedup for mel spectrogram computation on Apple platforms
-- **Korean Word Splitting**: Soynlp LTokenizer port with bundled 18K-word dictionary
+- **Language-Aware Alignment Units**: Korean uses the bundled Soynlp-style dictionary, Chinese/Japanese use UTF-8 character units, and other languages use whitespace-delimited words
 
 ## Model Conversion
 
@@ -199,6 +250,15 @@ The model supports 30+ languages:
 | Hungarian | hu | Romanian | ro |
 | Ukrainian | uk | Hebrew | he |
 
+For forced alignment, language affects how reference text is split before timestamp classification:
+
+| Language | Accepted values | Alignment unit strategy |
+|----------|-----------------|-------------------------|
+| Korean | `korean` | Soynlp-style LTokenizer with `assets/korean_dict_jieba.dict`; falls back to whitespace if the dictionary is unavailable |
+| Chinese | `chinese`, `zh` | UTF-8 character units |
+| Japanese | `japanese`, `ja`, `jp` | UTF-8 character units |
+| Other languages | language name or code | Whitespace-delimited words |
+
 ## Audio Requirements
 
 - **Format**: WAV (PCM)
@@ -231,7 +291,6 @@ For production builds, omit `-DQWEN3_ASR_TIMING=ON` to remove timing overhead.
 ```
 qwen3-asr.cpp/
 ├── src/
-│   ├── main.cpp              # CLI entry point
 │   ├── qwen3_asr.cpp/h       # High-level ASR API
 │   ├── forced_aligner.cpp/h  # Forced alignment implementation
 │   ├── audio_encoder.cpp/h   # Audio feature encoder
@@ -240,10 +299,13 @@ qwen3-asr.cpp/
 │   ├── audio_injection.cpp/h # Audio-text embedding injection
 │   ├── gguf_loader.cpp/h     # GGUF model loading
 │   └── timing.h              # Timing instrumentation macros
+├── cli/
+│   └── main.cpp              # CLI entry point
 ├── tests/
 │   ├── test_mel.cpp          # Mel spectrogram tests
 │   ├── test_encoder.cpp      # Audio encoder tests
 │   ├── test_decoder.cpp      # Text decoder tests
+│   ├── test_forced_aligner_tokenize.cpp # Alignment unit splitting regression test
 │   └── reference/            # Reference data for validation
 ├── scripts/
 │   └── convert_hf_to_gguf.py # Model conversion script
